@@ -418,7 +418,7 @@ class BadCRC(Exception):
     pass
 
 
-class BadCommandIsRunning(Exception):
+class BadCommand(Exception):
     pass
 
 
@@ -450,20 +450,19 @@ class Sas():
         self.mashin_n = None
         self.aft_get_last_transaction = aft_get_last_transaction
         # self.last_transaction_n = None
-        self.denom = denom
         self.asset_number = '01000000'
         self.reg_key = '0000000000000000000000000000000000000000'
         self.POS_ID = 'B374A402'
         self.transaction = None
         self.my_key = '44'
         self.poll_adress = poll_adress
+        self.denom = denom
         self.sas_dump = sas_dump
-        self.timeout = timeout
-        self.last_gpoll_event = None
+        self.event = None
         if self.sas_dump:
             os.system('sudo touch /var/log/sas_dump.log')
             os.system('sudo chown colibri:colibri /var/log/sas_dump.log')
-            self.my_log = open('/var/log/sas_dump.log', 'w')
+            self.my_log = open('/var/log/sas_dump.log', 'a')
             self.my_log.close()
         if log == None:
             self.log = log_to_stderr()
@@ -472,8 +471,10 @@ class Sas():
             self.log = log
         while 1:
             try:
+                # print 1
                 self.connection = serial.Serial(port=port, baudrate=19200, timeout=timeout)
                 self.close()
+                self.timeout = timeout
                 self.log.info('SAS Port OK!')
                 break
             except:
@@ -492,7 +493,7 @@ class Sas():
             self.connection.reset_output_buffer()
         except Exception as e:
             self.log.error(e, exc_info=True)
-        # self.close()
+        self.close()
 
     def flush(self):
         try:
@@ -501,24 +502,7 @@ class Sas():
             self.connection.flush()
         except Exception as e:
             self.log.error(e, exc_info=True)
-
-    def flushInput(self):
-        try:
-            if self.is_open() == False:
-                self.open()
-            self.connection.flushInput()
-        except Exception as e:
-            self.log.error(e, exc_info=True)
-        # self.close()
-
-    def flushOutput(self):
-        try:
-            if self.is_open() == False:
-                self.open()
-            self.connection.flushOutput()
-        except Exception as e:
-            self.log.error(e, exc_info=True)
-        # self.close()
+        self.close()
 
     def start(self):
         self.log.info('Connecting SAS...')
@@ -534,8 +518,7 @@ class Sas():
                 except Exception as e:
                     self.log.critical(e, exc_info=True)
             else:
-                self.flush()
-                # self.flushInput()
+                self.connection.flush()
                 response = self.connection.read(1)
                 if response == None:
                     self.log.error('No SAS Connection')
@@ -558,8 +541,7 @@ class Sas():
 
     def open(self):
         try:
-            if self.connection.isOpen() is not True:
-                self.connection.open()
+            self.connection.open()
         except:
             raise SASOpenError
 
@@ -569,7 +551,7 @@ class Sas():
         self.connection.parity = serial.PARITY_NONE
         self.connection.stopbits = serial.STOPBITS_TWO
         self.open()
-        # self.clean_buffer()
+
 
     def _conf_port(self):
         self.close()
@@ -577,6 +559,7 @@ class Sas():
         self.connection.parity = serial.PARITY_MARK
         self.connection.stopbits = serial.STOPBITS_ONE
         self.open()
+        # self.clean_buffer()
 
     def crc(self, response, chk=False, seed=0):
         c = ''
@@ -628,11 +611,6 @@ class Sas():
             #     self.poll_adres = '82'
 
             buf_header = [self.adress]
-            if self.sas_dump:
-                self.my_log = open('/var/log/sas_dump.log', 'a')
-                self.my_log.write('TX %s: %s\n' % (time.time(), '82'+ binascii.hexlify(bytearray(buf_header))))
-                self.my_log.close()
-            # self.flush()
             self._conf_port()
             # self.connection.flushInput()
             # self.connection.write(('80' + self.mashin_n).decode("hex"))
@@ -642,24 +620,25 @@ class Sas():
 
             buf_header.extend(command)
             buf_count = len(command)
+            # buf_header[2]=buf_count+2
             if (crc_need == True):
                 crc = CRC16Kermit().calculate(bytes(buf_header))
                 buf_header.extend([((crc >> 8) & 0xFF), (crc & 0xFF)])
             self.log.debug(buf_header)
-
-            # buf_header[2]=buf_count+2
-
+            # time.sleep(0.04)
             self.connection.write([self.poll_adress, self.adress])
-            self.flush()
+            time.sleep(0.02)
+            self.close()
             self.connection.parity = serial.PARITY_SPACE
-            # self.open()
+            self.open()
             # self.connection.flushInput()
             # my_log = open('/home/colibri/dump.log', 'w')
-
-            # self.my_log = open('/var/log/sas_dump.log', 'w')
+            if self.sas_dump:
+                self.my_log = open('/var/log/sas_dump.log', 'a')
+                self.my_log.write('TX %s: %s\n' % (time.time(), binascii.hexlify(bytearray(buf_header))))
+                self.my_log.close()
             # print self.connection.portstr
             # self.connection.write([0x31, 0x32,0x33,0x34,0x35])
-            time.sleep(0.01)
             self.connection.write(buf_header[1:])
 
         except Exception as e:
@@ -669,7 +648,19 @@ class Sas():
             buffer = []
             # t = time.time()
             # while time.time() - t < self.timeout:
-            #     response += self.connection.read()
+            #     tmp = self.connection.read(1)
+            #     if not tmp:
+            #         pass
+            #     elif binascii.hexlify(tmp) == bytes(self.mashin_n.encode('utf-8')) and not response:
+            #         response += tmp
+            #     elif len(response) == 1 and no_response is False and binascii.hexlify(tmp) == binascii.hexlify(
+            #             bytearray([buf_header[1]])):
+            #         response += tmp
+            #     elif len(response) == 1 and no_response is False and binascii.hexlify(tmp) != binascii.hexlify(
+            #             bytearray([buf_header[1]])):
+            #         response = b''
+            #     elif response:
+            #         response += tmp
             #     if len(response) == size:
             #         break
             response = self.connection.read(size)
@@ -678,12 +669,8 @@ class Sas():
                     # raise KeyError(response)
                     return int(binascii.hexlify(response))
                 except ValueError as e:
-                    self.log.warning('no sas response %s' % (str(buf_header[1:])))
+                    self.log.warning("wrong ardess or NACK")
                     return None
-            else:
-                if int(binascii.hexlify(response)[2:4], 16) != buf_header[1]:
-                    raise BadCommandIsRunning('response %s run %s' % (binascii.hexlify(response), binascii.hexlify(bytearray(buf_header))))
-
             #     else:
             #         # response += self.connection.read(size)
             #         if (self.checkResponse(response, size) is False):
@@ -696,10 +683,8 @@ class Sas():
             #     return None
 
             busy = False
+            response = self.checkResponse(response)
             self.log.debug('sas response %s', binascii.hexlify(response))
-            response = self.checkResponse(response, binascii.hexlify(bytearray(buf_header)))
-            if not response:
-                response = None
                 # self.log.info('no sas response')
             return response
             # return None
@@ -709,11 +694,11 @@ class Sas():
         busy = False
         return None
 
-    def checkResponse(self, rsp, cmd):
+    def checkResponse(self, rsp):
         if not rsp:
             # self.flush()
             # self.close()
-            raise NoSasConnection(cmd)
+            raise NoSasConnection('NoSasConnection')
         # if self.crc(rsp.hex(), True):
         #    return rsp[1:-2]
         # raise BadCRC(rsp)
@@ -732,14 +717,13 @@ class Sas():
         data = resp[1:-2]
 
         crc1 = hex(crc1).split('x')[-1]
-        crc1 = crc1.zfill(4)
-        # while len(crc1) < 4:
-        #     crc1 = "0" + crc1
 
-        if self.sas_dump:
-            self.my_log = open('/var/log/sas_dump.log', 'a')
-            self.my_log.write('RX %s: %s\n' % (time.time(), binascii.hexlify(resp)))
-            self.my_log.close()
+        while len(crc1) < 4:
+            crc1 = "0" + crc1
+
+        # print crc1
+        # print CRC
+        # raise KeyError(crc1, CRC)
         if (CRC != crc1):
             # print "Wrong response command hash " + str(CRC)
             # print    "////" + str(hex(crc1).split('x')[-1])
@@ -747,6 +731,10 @@ class Sas():
             raise BadCRC(self.hexlify(self.bytearray(resp)))
         # return False
         elif CRC == crc1:
+            if self.sas_dump:
+                self.my_log = open('/var/log/sas_dump.log', 'a')
+                self.my_log.write('RX %s: %s\n' % (time.time(), binascii.hexlify(resp)))
+                self.my_log.close()
             return data
         # raise BadCRC(self.hexlify(resp))
 
@@ -775,14 +763,14 @@ class Sas():
             # if event != '':
             #     break
             if event == '':
-                raise NoSasConnection
+                raise NoSasConnection('NoSasConnection')
                 # event = None
                 # return None
             # self.my_log.write('RX %s: %s\n' % (time.time(), event.encode('hex')))
             # self.my_log.flush()
             event = GPOLL[event.hex()]
-            if self.last_gpoll_event != event:
-                self.last_gpoll_event = event
+            if event != self.event:
+                self.event = event
             else:
                 event = 'No activity'
         except KeyError as e:
@@ -876,8 +864,7 @@ class Sas():
         cmd = [0x09]
 
         cmd.extend([((game >> 8) & 0xFF), (game & 0xFF)])
-        cmd.extend(self.bytearray(en_dis))
-        # print cmd
+        cmd.extend(en_dis)
         if (self._send_command(cmd, True, crc_need=True) == self.adress):
             return game_number
         # else:
@@ -920,8 +907,7 @@ class Sas():
         if (data is not None):
             meters = {}
             if denom == True:
-                meters['total_cancelled_credits_meter'] = round(
-                    int((self.hexlify(self.bytearray(data[1:5])))) * self.denom, 2)
+                meters['total_cancelled_credits_meter'] = round(int((self.hexlify(self.bytearray(data[1:5])))) * self.denom, 2)
                 meters['total_in_meter'] = round(int(self.hexlify(self.bytearray(data[5:9]))) * self.denom, 2)
                 meters['total_out_meter'] = round(int(self.hexlify(self.bytearray(data[9:13]))) * self.denom, 2)
                 meters['total_droup_meter'] = round(int(self.hexlify(self.bytearray(data[13:17]))) * self.denom, 2)
@@ -2383,7 +2369,7 @@ class Sas():
                 transaction = int('2020202020202020202020202020202021', 16)
                 self.log.warning('AFT no transaction')
         else:
-            # if not self.transaction:
+            #if not self.transaction:
             transaction = int('2020202020202020202020202020202021', 16)
             self.log.warning('AFT no transaction')
         return transaction
@@ -2870,8 +2856,91 @@ class Sas():
 
 
 class SAS_USB(Sas):
-    pass
 
+    def _send_command(self, command, no_response=False, timeout=None, crc_need=True, size=1):
+        # if timeout == None:
+        #     timeout = self.timeout + 1
+        # time.sleep(0.04)
+        busy = True
+        response = b''
+        # self.my_log.flush()
+        try:
+            # if self.poll_adres == '82':
+            #     self.poll_adres = '80'
+            # else:
+            #     self.poll_adres = '82'
+
+            buf_header = [self.adress]
+            self._conf_port()
+            # self.connection.write(('80' + self.mashin_n).decode("hex"))
+            # self.close()
+            # self.connection.parity = serial.PARITY_SPACE
+            # self.open()
+
+            buf_header.extend(command)
+            buf_count = len(command)
+            # self.log.debug('%s', buf_header)
+            if (crc_need == True):
+                crc = CRC16Kermit().calculate(bytes(buf_header))
+                buf_header.extend([((crc >> 8) & 0xFF), (crc & 0xFF)])
+            self.log.debug(buf_header)
+            # time.sleep(0.04)
+            self.connection.write([self.poll_adress, self.adress])
+            time.sleep(0.02)
+            # self.close()
+            self.connection.parity = serial.PARITY_SPACE
+            # self.open()
+            # my_log = open('/home/colibri/dump.log', 'w')
+            if self.sas_dump:
+                self.my_log = open('/var/log/sas_dump.log', 'a')
+                self.my_log.write('TX %s: %s\n' % (time.time(), binascii.hexlify(bytearray(buf_header))))
+                self.my_log.close()
+
+            # print self.connection.portstr
+            # self.connection.write([0x31, 0x32,0x33,0x34,0x35])
+            self.connection.write(buf_header[1:])
+
+
+        except Exception as e:
+            self.log.error(e, exc_info=True)
+
+        try:
+            buffer = []
+            #            self.connection.flushInput()
+            # time.sleep(0.04)
+            # t = time.time()
+            # while time.time() - t < timeout:
+            response = self.connection.read(size)
+            # self.log.error('%s', response)
+            if no_response == True:
+                try:
+                    # raise KeyError(response)
+                    return int(binascii.hexlify(response))
+                except ValueError as e:
+                    self.log.warning("wrong ardess or NACK")
+                    return None
+            #     else:
+            #         # response += self.connection.read(size)
+            #         if (self.checkResponse(response, size) is False):
+            #             break
+            #
+            # if time.time() - t >= timeout:
+            #     self.log.warning("sas timeout")
+            #     # buffer.append(response)
+            #     # print response))
+            #     return None
+
+            busy = False
+            response = self.checkResponse(response)
+            self.log.debug('sas response %s', response)
+                # self.log.info('no sas response')
+            return response
+            # return None
+        except Exception as e:
+            self.log.error(e, exc_info=True)
+
+        busy = False
+        return None
 
 
 if __name__ == '__main__':
@@ -2879,10 +2948,6 @@ if __name__ == '__main__':
     print(sas.start())
     print(sas.gaming_machine_ID())
     sas.transaction = sas.AFT_get_last_transaction()
-    print(sas.transaction)
-    print(sas.send_meters_10_15())
-    print(sas.events_poll())
-    print(sas.AFT_in(1))
-    print(sas.AFT_clean_transaction_poll())
-    print(sas.send_meters_10_15())
-
+    while True:
+        print(sas.send_meters_10_15())
+        print(sas.total_dollar_value_of_bills_meter())
