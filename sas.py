@@ -444,21 +444,25 @@ class EMGGpollBadResponse(Exception):
 
 class Sas():
 
-    def __init__(self, port, timeout=2, log=None, poll_adress=0x82, aft_get_last_transaction=True, sas_dump=False, denom=0.01):
+    def __init__(self, port, timeout=2, log=None, sleep_time=0.02, poll_adress=0x82, aft_check_last_transaction=True, sas_dump=False, denom=0.01, lock_time=0, get_aft_transaction_from_EMG=False,):
         # self.poll_adres = '82'
         self.adress = None
         self.mashin_n = None
-        self.aft_get_last_transaction = aft_get_last_transaction
+        self.sleep_time = sleep_time
+        self.lock_time = lock_time
+        self.aft_check_last_transaction = aft_check_last_transaction
         # self.last_transaction_n = None
         self.asset_number = '01000000'
         self.reg_key = '0000000000000000000000000000000000000000'
         self.POS_ID = 'B374A402'
         self.transaction = None
-        self.my_key = '44'
+        # self.my_key = '44'
         self.poll_adress = poll_adress
         self.denom = denom
         self.sas_dump = sas_dump
         self.event = None
+        self.last_AFT_lock_status = False
+        self.get_aft_transaction_from_EMG = get_aft_transaction_from_EMG
         if self.sas_dump:
             os.system('sudo touch /var/log/sas_dump.log')
             os.system('sudo chown colibri:colibri /var/log/sas_dump.log')
@@ -627,7 +631,7 @@ class Sas():
             self.log.debug(buf_header)
             # time.sleep(0.04)
             self.connection.write([self.poll_adress, self.adress])
-            time.sleep(0.02)
+            time.sleep(self.sleep_time)
             self.close()
             self.connection.parity = serial.PARITY_SPACE
             self.open()
@@ -1198,13 +1202,15 @@ class Sas():
     def delay_game(self, delay_time=100, **kwargs):
         # 2E
         tmp = []
-        delay_time = str(delay_time)
-        delay = '' + ('0' * (4 - len(delay_time)) + delay_time)
-        cmd = [0x2E]
-        count = 0
-        for i in range(int(len(delay) / 2)):
-            cmd.append(int(delay[count:count + 2], 16))
-            count += 2
+        delay_time = self.mony_to_hex(delay_time, 2, False)
+        # delay_time = str(delay_time)
+        # delay = '' + ('0' * (4 - len(delay_time)) + delay_time)
+        cmd = '2E' + delay_time
+        cmd = self.cmd_to_list(cmd)
+        # count = 0
+        # for i in range(int(len(delay) / 2)):
+        #     cmd.append(int(delay[count:count + 2], 16))
+        #     count += 2
         if self._send_command(cmd, True, crc_need=True) == self.adress:
             return True
         else:
@@ -1512,12 +1518,14 @@ class Sas():
             return str(self.hexlify(self.bytearray(data[1:])))
         return None
 
-    def game_meters(self, n=None, denom=True, **kwargs):
+    def game_meters(self, game_number=None, denom=True, **kwargs):
         # 52
         cmd = [0x52]
-        if n == None:
-            n == self.selected_game_number(in_hex=False)
-        cmd.extend([((n >> 8) & 0xFF), (n & 0xFF)])
+        if game_number == None:
+            game_number == self.selected_game_number(in_hex=False)
+        else:
+            game_number = int(game_number, 16)
+        cmd.extend([((game_number >> 8) & 0xFF), (game_number & 0xFF)])
 
         data = self._send_command(cmd, crc_need=True, size=22)
         if (data is not None):
@@ -1537,13 +1545,15 @@ class Sas():
             return meters
         return None
 
-    def game_configuration(self, n=None, **kwargs):
+    def game_configuration(self, game_number=None, **kwargs):
         # 53
         # FIXME: game_configuration
-        if n == None:
-            n = self.selected_game_number(in_hex=False)
+        if game_number == None:
+            game_number = self.selected_game_number(in_hex=False)
+        else:
+            game_number = int(game_number, 16)
         cmd = [0x53]
-        cmd.extend([(n & 0xFF), ((n >> 8) & 0xFF)])
+        cmd.extend([(game_number & 0xFF), ((game_number >> 8) & 0xFF)])
 
         data = self._send_command(cmd, True, crc_need=True)
         if (data is not None):
@@ -1744,7 +1754,11 @@ class Sas():
             return data[1]
         return None
 
-    def AFT_jp(self, mony, amount=1, lock_timeout=0, games=None, **kwargs):
+    def AFT_change_transaction(self, transaction='2020202020202020202020202020202021'):
+        self.transaction = int(transaction, 16)
+        return True
+
+    def AFT_jp(self, mony, amount=1, lock_timeout=None, games=None, **kwargs):
         # self.lock_emg(lock_time=500, condition=1)
         if self.denom > 0.01:
             return None
@@ -1769,46 +1783,58 @@ class Sas():
         my_time = datetime.datetime.now()
         my_time = datetime.datetime.strftime(my_time, '%m%d%Y')
         if mony == None:
-            mony = str(self.current_credits(denom=False))
-        else:
-            mony = str(int((mony / self.denom)))
-            mony = mony.replace('.', '')
-        mony = '0' * (10 - len(mony)) + mony
+            mony = self.current_credits(denom=True)
+        mony_1 = mony_2 = mony_3 = self.mony_to_hex(0, 5)
         if amount == 1:
-            mony_1 = mony
-            mony_2 = '0000000000'
-            mony_3 = '0000000000'
+            mony_1 = self.mony_to_hex(mony, 5)
         elif amount == 2:
-            mony_1 = '0000000000'
-            mony_2 = mony
-            mony_3 = '0000000000'
+            mony_2 = self.mony_to_hex(mony, 5)
         elif amount == 3:
-            mony_1 = '0000000000'
-            mony_2 = '0000000000'
-            mony_3 = mony
+            mony_3 = self.mony_to_hex(mony, 5)
         else:
             raise AFTBadAmount
-
+        self.AFT_register()
+        if lock_timeout is None:
+            lock_timeout = self.lock_time
+        self.last_AFT_lock_status = False
+        if lock_timeout > 0:
+            lock_data = self.AFT_game_lock_and_status_request(lock_timeout=lock_timeout)
+            if lock_data == None or lock_data == False:
+                self.log.warning('EMG is not locked')
+                self.last_AFT_lock_status = True
+                data = self.AFT_clean_transaction_poll()
+                return False
+            if lock_data['game_lock_status'] != '00':
+                self.log.warning('EMG is not locked')
+                self.last_AFT_lock_status = True
+                data = self.AFT_clean_transaction_poll()
+                return False
         last_transaction = self.AFT_format_transaction()
         len_transaction_id = hex(len(last_transaction) // 2)[2:]
         if len(len_transaction_id) < 2:
             len_transaction_id = '0' + len_transaction_id
         elif len(len_transaction_id) % 2 == 1:
             len_transaction_id = '0' + len_transaction_id
-        cmd = '72{my_key}{index}00{transfer_code}{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
+        cmd = '{index}00{transfer_code}{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
             transfer_code='11', index='00', mony_1=mony_1, mony_2=mony_2, mony_3=mony_3,
             asett=self.asset_number, key=self.reg_key, len_transaction=len_transaction_id, transaction=last_transaction,
-            times=my_time, my_key=self.my_key, transfer_flag='00')
-        new_cmd = []
-        count = 0
-        for i in range(int(len(cmd) / 2)):
-            new_cmd.append(int(cmd[count:count + 2], 16))
-            count += 2
+            times=my_time, transfer_flag='00')
+        cmd = '72' + hex(int(len(cmd) // 2))[2:] + cmd
+        new_cmd = self.cmd_to_list(cmd)
+        # count = 0
+        # for i in range(int(len(cmd) / 2)):
+        #     new_cmd.append(int(cmd[count:count + 2], 16))
+        #     count += 2
 
         response = None
-        self.AFT_register()
-        if lock_timeout > 0:
-            self.AFT_game_lock(lock_timeout, condition=1)
+        # self.AFT_register()
+        # if lock_timeout == 0:
+        #     lock_timeout = self.lock_time
+        # if lock_timeout > 0:
+        #     lock_data = self.AFT_game_lock_and_status_request(lock_timeout=lock_timeout)
+        #     if lock_data['game_lock_status'] != '00':
+        #         self.log.warning('EMG is not locked')
+        #         return None
         data = self._send_command(new_cmd, crc_need=True, size=82)
         if (data is not None):
             a = int(self.hexlify(self.bytearray(data[26:27])), 16)
@@ -1818,9 +1844,9 @@ class Sas():
                 'Transfer status': AFT_TRANSFER_STATUS[self.hexlify(self.bytearray(data[3:4]))],
                 'Receipt status': AFT_RECEIPT_STATUS[self.hexlify(self.bytearray(data[4:5]))],
                 'Transfer type': AFT_TRANSFER_TYPE[self.hexlify(self.bytearray(data[5:6]))],
-                'Cashable amount': int(self.hexlify(self.bytearray(data[6:11]))) * self.denom,
-                'Restricted amount': int(self.hexlify(self.bytearray(data[11:16]))) * self.denom,
-                'Nonrestricted amount': int(self.hexlify(self.bytearray(data[16:21]))) * self.denom,
+                'Cashable amount': round(int(self.hexlify(self.bytearray(data[6:11]))) * self.denom, 2),
+                'Restricted amount': round(int(self.hexlify(self.bytearray(data[11:16]))) * self.denom, 2),
+                'Nonrestricted amount': round(int(self.hexlify(self.bytearray(data[16:21]))) * self.denom, 2),
                 'Transfer flags': self.hexlify(self.bytearray(data[21:22])),
                 'Asset number': self.hexlify(self.bytearray(data[22:26])),
                 'Transaction ID length': self.hexlify(self.bytearray(data[26:27])),
@@ -1832,53 +1858,61 @@ class Sas():
         #     self.log.warning('AFT UNREGISTER ERROR: won to host')
         return response
 
-    def AFT_initial_out(self, mony=None, amount=1, lock_timeout=0, **kwargs):
+    def AFT_initial_out(self, mony=None, amount=1, lock_timeout=None, **kwargs):
         # self.lock_emg(lock_time=500, condition=1)
         if self.denom > 0.01:
             return None
         my_time = datetime.datetime.now()
         my_time = datetime.datetime.strftime(my_time, '%m%d%Y')
         if mony == None:
-            mony = str(self.current_credits(denom=False))
-        else:
-            mony = str(int((mony / self.denom)))
-            mony = mony.replace('.', '')
-        mony = '0' * (10 - len(mony)) + mony
+            mony = self.current_credits(denom=True)
+        mony_1 = mony_2 = mony_3 = self.mony_to_hex(0, 5)
         if amount == 1:
-            mony_1 = mony
-            mony_2 = '0000000000'
-            mony_3 = '0000000000'
+            mony_1 = self.mony_to_hex(mony, 5)
         elif amount == 2:
-            mony_1 = '0000000000'
-            mony_2 = mony
-            mony_3 = '0000000000'
+            mony_2 = self.mony_to_hex(mony, 5)
         elif amount == 3:
-            mony_1 = '0000000000'
-            mony_2 = '0000000000'
-            mony_3 = mony
+            mony_3 = self.mony_to_hex(mony, 5)
         else:
             raise AFTBadAmount
-
+        self.AFT_register()
+        if lock_timeout is None:
+            lock_timeout = self.lock_time
+        self.last_AFT_lock_status = False
+        if lock_timeout > 0:
+            lock_data = self.AFT_game_lock_and_status_request(lock_timeout=lock_timeout)
+            if lock_data == None or lock_data == False:
+                self.log.warning('EMG is not locked')
+                self.last_AFT_lock_status = True
+                data = self.AFT_clean_transaction_poll()
+                return False
+            if lock_data['game_lock_status'] != '00':
+                self.log.warning('EMG is not locked')
+                self.last_AFT_lock_status = True
+                data = self.AFT_clean_transaction_poll()
+                return False
         last_transaction = self.AFT_format_transaction()
         len_transaction_id = hex(len(last_transaction) // 2)[2:]
         if len(len_transaction_id) < 2:
             len_transaction_id = '0' + len_transaction_id
         elif len(len_transaction_id) % 2 == 1:
             len_transaction_id = '0' + len_transaction_id
-        cmd = '72{my_key}{index}00{transfer_code}{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
+        cmd = '{index}00{transfer_code}{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
             transfer_code='00', index='00', mony_1=mony_1, mony_2=mony_2, mony_3=mony_3,
             asett=self.asset_number, key=self.reg_key, len_transaction=len_transaction_id, transaction=last_transaction,
-            times=my_time, my_key=self.my_key, transfer_flag='0a')
-        new_cmd = []
-        count = 0
-        for i in range(int(len(cmd) / 2)):
-            new_cmd.append(int(cmd[count:count + 2], 16))
-            count += 2
+            times=my_time, transfer_flag='0a')
+        cmd = '72' + hex(int(len(cmd) // 2))[2:] + cmd
+        new_cmd = self.cmd_to_list(cmd)
 
         response = None
-        self.AFT_register()
-        if lock_timeout > 0:
-            self.AFT_game_lock(lock_timeout, condition=1)
+        # self.AFT_register()
+        # if lock_timeout == 0:
+        #     lock_timeout = self.lock_time
+        # if lock_timeout > 0:
+        #     lock_data = self.AFT_game_lock_and_status_request(lock_timeout=lock_timeout)
+        #     if lock_data['game_lock_status'] != '00':
+        #         self.log.warning('EMG is not locked')
+        #         return None
         try:
             data = self._send_command(new_cmd, crc_need=True, size=82)
             if (data is not None):
@@ -1889,9 +1923,9 @@ class Sas():
                     'Transfer status': AFT_TRANSFER_STATUS[self.hexlify(self.bytearray(data[3:4]))],
                     'Receipt status': AFT_RECEIPT_STATUS[self.hexlify(self.bytearray(data[4:5]))],
                     'Transfer type': AFT_TRANSFER_TYPE[self.hexlify(self.bytearray(data[5:6]))],
-                    'Cashable amount': int(self.hexlify(self.bytearray(data[6:11]))) * self.denom,
-                    'Restricted amount': int(self.hexlify(self.bytearray(data[11:16]))) * self.denom,
-                    'Nonrestricted amount': int(self.hexlify(self.bytearray(data[16:21]))) * self.denom,
+                    'Cashable amount': round(int(self.hexlify(self.bytearray(data[6:11]))) * self.denom, 2),
+                    'Restricted amount': round(int(self.hexlify(self.bytearray(data[11:16]))) * self.denom, 2),
+                    'Nonrestricted amount': round(int(self.hexlify(self.bytearray(data[16:21]))) * self.denom, 2),
                     'Transfer flags': self.hexlify(self.bytearray(data[21:22])),
                     'Asset number': self.hexlify(self.bytearray(data[22:26])),
                     'Transaction ID length': self.hexlify(self.bytearray(data[26:27])),
@@ -1905,53 +1939,61 @@ class Sas():
         #     self.log.warning('AFT UNREGISTER ERROR: out')
         return response
 
-    def AFT_out(self, mony=None, amount=1, lock_timeout=0, **kwargs):
+    def AFT_out(self, mony=None, amount=1, lock_timeout=None, **kwargs):
         # self.lock_emg(lock_time=500, condition=1)
         if self.denom > 0.01:
             return None
         my_time = datetime.datetime.now()
         my_time = datetime.datetime.strftime(my_time, '%m%d%Y')
         if mony == None:
-            mony = str(self.current_credits(denom=False))
-        else:
-            mony = str(int((mony / self.denom)))
-            mony = mony.replace('.', '')
-        mony = '0' * (10 - len(mony)) + mony
+            mony = self.current_credits(denom=True)
+        mony_1 = mony_2 = mony_3 = self.mony_to_hex(0, 5)
         if amount == 1:
-            mony_1 = mony
-            mony_2 = '0000000000'
-            mony_3 = '0000000000'
+            mony_1 = self.mony_to_hex(mony, 5)
         elif amount == 2:
-            mony_1 = '0000000000'
-            mony_2 = mony
-            mony_3 = '0000000000'
+            mony_2 = self.mony_to_hex(mony, 5)
         elif amount == 3:
-            mony_1 = '0000000000'
-            mony_2 = '0000000000'
-            mony_3 = mony
+            mony_3 = self.mony_to_hex(mony, 5)
         else:
             raise AFTBadAmount
-
+        self.AFT_register()
+        if lock_timeout is None:
+            lock_timeout = self.lock_time
+        self.last_AFT_lock_status = False
+        if lock_timeout > 0:
+            lock_data = self.AFT_game_lock_and_status_request(lock_timeout=lock_timeout)
+            if lock_data == None or lock_data == False:
+                self.log.warning('EMG is not locked')
+                self.last_AFT_lock_status = True
+                data = self.AFT_clean_transaction_poll()
+                return False
+            if lock_data['game_lock_status'] != '00':
+                self.log.warning('EMG is not locked')
+                self.last_AFT_lock_status = True
+                data = self.AFT_clean_transaction_poll()
+                return False
         last_transaction = self.AFT_format_transaction()
         len_transaction_id = hex(len(last_transaction) // 2)[2:]
         if len(len_transaction_id) < 2:
             len_transaction_id = '0' + len_transaction_id
         elif len(len_transaction_id) % 2 == 1:
             len_transaction_id = '0' + len_transaction_id
-        cmd = '72{my_key}{index}00{transfer_code}{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
+        cmd = '{index}00{transfer_code}{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
             transfer_code='80', index='00', mony_1=mony_1, mony_2=mony_2, mony_3=mony_3,
             asett=self.asset_number, key=self.reg_key, len_transaction=len_transaction_id, transaction=last_transaction,
-            times=my_time, my_key=self.my_key, transfer_flag='00')
-        new_cmd = []
-        count = 0
-        for i in range(int(len(cmd) / 2)):
-            new_cmd.append(int(cmd[count:count + 2], 16))
-            count += 2
+            times=my_time, transfer_flag='00')
+        cmd = '72' + hex(int(len(cmd) // 2))[2:] + cmd
+        new_cmd = self.cmd_to_list(cmd)
 
         response = None
-        self.AFT_register()
-        if lock_timeout > 0:
-            self.AFT_game_lock(lock_timeout, condition=1)
+        # self.AFT_register()
+        # if lock_timeout == 0:
+        #     lock_timeout = self.lock_time
+        # if lock_timeout > 0:
+        #     lock_data = self.AFT_game_lock_and_status_request(lock_timeout=lock_timeout)
+        #     if lock_data['game_lock_status'] != '00':
+        #         self.log.warning('EMG is not locked')
+        #         return None
         try:
             data = self._send_command(new_cmd, crc_need=True, size=82)
             if (data is not None):
@@ -1962,9 +2004,9 @@ class Sas():
                     'Transfer status': AFT_TRANSFER_STATUS[self.hexlify(self.bytearray(data[3:4]))],
                     'Receipt status': AFT_RECEIPT_STATUS[self.hexlify(self.bytearray(data[4:5]))],
                     'Transfer type': AFT_TRANSFER_TYPE[self.hexlify(self.bytearray(data[5:6]))],
-                    'Cashable amount': int(self.hexlify(self.bytearray(data[6:11]))) * self.denom,
-                    'Restricted amount': int(self.hexlify(self.bytearray(data[11:16]))) * self.denom,
-                    'Nonrestricted amount': int(self.hexlify(self.bytearray(data[16:21]))) * self.denom,
+                    'Cashable amount': round(int(self.hexlify(self.bytearray(data[6:11]))) * self.denom, 2),
+                    'Restricted amount': round(int(self.hexlify(self.bytearray(data[11:16]))) * self.denom, 2),
+                    'Nonrestricted amount': round(int(self.hexlify(self.bytearray(data[16:21]))) * self.denom, 2),
                     'Transfer flags': self.hexlify(self.bytearray(data[21:22])),
                     'Asset number': self.hexlify(self.bytearray(data[22:26])),
                     'Transaction ID length': self.hexlify(self.bytearray(data[26:27])),
@@ -1982,23 +2024,7 @@ class Sas():
 
         my_time = datetime.datetime.now()
         my_time = datetime.datetime.strftime(my_time, '%m%d%Y')
-        mony = '0000000000'
-
-        if amount == 1:
-            mony_1 = mony
-            mony_2 = '0000000000'
-            mony_3 = '0000000000'
-        elif amount == 2:
-            mony_1 = '0000000000'
-            mony_2 = mony
-            mony_3 = '0000000000'
-        elif amount == 3:
-            mony_1 = '0000000000'
-            mony_2 = '0000000000'
-            mony_3 = mony
-        else:
-            raise AFTBadAmount
-
+        mony_1 = mony_2 = mony_3 = self.mony_to_hex(0, 5)
         last_transaction = self.AFT_format_transaction()
         len_transaction_id = hex(len(last_transaction) // 2)[2:]
         if len(len_transaction_id) < 2:
@@ -2006,15 +2032,12 @@ class Sas():
         elif len(len_transaction_id) % 2 == 1:
             len_transaction_id = '0' + len_transaction_id
 
-        cmd = '72{my_key}00{index}{transfer_code}{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
+        cmd = '00{index}{transfer_code}{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
             transfer_code='80', index='00', mony_1=mony_1, mony_2=mony_2, mony_3=mony_3,
             asett=self.asset_number, key=self.reg_key, len_transaction=len_transaction_id, transaction=last_transaction,
-            times=my_time, my_key=self.my_key, transfer_flag='02')
-        new_cmd = []
-        count = 0
-        for i in range(int(len(cmd) / 2)):
-            new_cmd.append(int(cmd[count:count + 2], 16))
-            count += 2
+            times=my_time, transfer_flag='02')
+        cmd = '72' + hex(int(len(cmd) // 2))[2:] + cmd
+        new_cmd = self.cmd_to_list(cmd)
         self.AFT_register()
 
         response = None
@@ -2028,9 +2051,9 @@ class Sas():
                     'Transfer status': AFT_TRANSFER_STATUS[self.hexlify(self.bytearray(data[3:4]))],
                     'Receipt status': AFT_RECEIPT_STATUS[self.hexlify(self.bytearray(data[4:5]))],
                     'Transfer type': AFT_TRANSFER_TYPE[self.hexlify(self.bytearray(data[5:6]))],
-                    'Cashable amount': int(self.hexlify(self.bytearray(data[6:11]))) * self.denom,
-                    'Restricted amount': int(self.hexlify(self.bytearray(data[11:16]))) * self.denom,
-                    'Nonrestricted amount': int(self.hexlify(self.bytearray(data[16:21]))) * self.denom,
+                    'Cashable amount': round(int(self.hexlify(self.bytearray(data[6:11]))) * self.denom, 2),
+                    'Restricted amount': round(int(self.hexlify(self.bytearray(data[11:16]))) * self.denom, 2),
+                    'Nonrestricted amount': round(int(self.hexlify(self.bytearray(data[16:21]))) * self.denom, 2),
                     'Transfer flags': self.hexlify(self.bytearray(data[21:22])),
                     'Asset number': self.hexlify(self.bytearray(data[22:26])),
                     'Transaction ID length': self.hexlify(self.bytearray(data[26:27])),
@@ -2052,7 +2075,7 @@ class Sas():
             pass
         return True
 
-    def AFT_won(self, mony, amount=1, games=None, lock_timeout=0, **kwargs):
+    def AFT_won(self, mony, amount=1, games=None, lock_timeout=None, **kwargs):
 
         if self.denom > 0.01:
             return None
@@ -2079,26 +2102,31 @@ class Sas():
 
         my_time = datetime.datetime.now()
         my_time = datetime.datetime.strftime(my_time, '%m%d%Y')
-        mony = str(int((mony / self.denom)))
-        mony = mony.replace('.', '')
-        mony = '0' * (10 - len(mony)) + mony
+        mony_1 = mony_2 = mony_3 = self.mony_to_hex(0, 5)
         if amount == 1:
-            mony_1 = mony
-            mony_2 = '0000000000'
-            mony_3 = '0000000000'
+            mony_1 = self.mony_to_hex(mony, 5)
         elif amount == 2:
-            mony_1 = '0000000000'
-            mony_2 = mony
-            mony_3 = '0000000000'
+            mony_2 = self.mony_to_hex(mony, 5)
         elif amount == 3:
-            mony_1 = '0000000000'
-            mony_2 = '0000000000'
-            mony_3 = mony
+            mony_3 = self.mony_to_hex(mony, 5)
         else:
             raise AFTBadAmount
-        # if lock == True:
-        #   self.lock_emg(lock_time=500, condition=0)
-        # self.lock_emg()
+        self.AFT_register()
+        if lock_timeout is None:
+            lock_timeout = self.lock_time
+        self.last_AFT_lock_status = False
+        if lock_timeout > 0:
+            lock_data = self.AFT_game_lock_and_status_request(lock_timeout=lock_timeout)
+            if lock_data == None or lock_data == False:
+                self.log.warning('EMG is not locked')
+                self.last_AFT_lock_status = True
+                data = self.AFT_clean_transaction_poll()
+                return False
+            if lock_data['game_lock_status'] != '00':
+                self.log.warning('EMG is not locked')
+                self.last_AFT_lock_status = True
+                data = self.AFT_clean_transaction_poll()
+                return False
         last_transaction = self.AFT_format_transaction()
         len_transaction_id = hex(int(len(last_transaction) // 2))[2:]
 
@@ -2107,21 +2135,15 @@ class Sas():
         elif len(len_transaction_id) % 2 == 1:
             len_transaction_id = '0' + len_transaction_id
 
-        cmd = '72{my_key}{transfer_code}{index}{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
+        cmd = '{transfer_code}{index}{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
             transfer_code='0000', index='10', mony_1=mony_1, mony_2=mony_2, mony_3=mony_3,
             asett=self.asset_number, key=self.reg_key, len_transaction=len_transaction_id, transaction=last_transaction,
-            times=my_time, my_key=self.my_key, transfer_flag='00')
+            times=my_time, transfer_flag='00')
+        cmd = '72' + hex(int(len(cmd) // 2))[2:] + cmd
 
-        new_cmd = []
-        count = 0
-        for i in range(int(len(cmd) / 2)):
-            new_cmd.append(int(cmd[count:count + 2], 16))
-            count += 2
+        new_cmd = self.cmd_to_list(cmd)
 
         response = None
-        self.AFT_register()
-        if lock_timeout > 0:
-            self.AFT_game_lock(lock_timeout, condition=3)
         try:
             data = self._send_command(new_cmd, crc_need=True, size=82)
             if (data is not None):
@@ -2132,9 +2154,9 @@ class Sas():
                     'Transfer status': AFT_TRANSFER_STATUS[self.hexlify(self.bytearray(data[3:4]))],
                     'Receipt status': AFT_RECEIPT_STATUS[self.hexlify(self.bytearray(data[4:5]))],
                     'Transfer type': AFT_TRANSFER_TYPE[self.hexlify(self.bytearray(data[5:6]))],
-                    'Cashable amount': int(self.hexlify(self.bytearray(data[6:11]))) * self.denom,
-                    'Restricted amount': int(self.hexlify(self.bytearray(data[11:16]))) * self.denom,
-                    'Nonrestricted amount': int(self.hexlify(self.bytearray(data[16:21]))) * self.denom,
+                    'Cashable amount': round(int(self.hexlify(self.bytearray(data[6:11]))) * self.denom, 2),
+                    'Restricted amount': round(int(self.hexlify(self.bytearray(data[11:16]))) * self.denom, 2),
+                    'Nonrestricted amount': round(int(self.hexlify(self.bytearray(data[16:21]))) * self.denom, 2),
                     'Transfer flags': self.hexlify(self.bytearray(data[21:22])),
                     'Asset number': self.hexlify(self.bytearray(data[22:26])),
                     'Transaction ID length': self.hexlify(self.bytearray(data[26:27])),
@@ -2147,29 +2169,36 @@ class Sas():
         #     self.log.warning('AFT UNREGISTER ERROR: won')
         return response
 
-    def AFT_in(self, mony, amount=1, lock_timeout=0, **kwargs):
+    def AFT_in(self, mony, amount=1, lock_timeout=None, **kwargs):
         if self.denom > 0.01:
             return None
         my_time = datetime.datetime.now()
         my_time = datetime.datetime.strftime(my_time, '%m%d%Y')
-        mony = str(int((mony / self.denom)))
-        mony = mony.replace('.', '')
-        mony = '0' * (10 - len(mony)) + mony
+        mony_1 = mony_2 = mony_3 = self.mony_to_hex(0, 5)
         if amount == 1:
-            mony_1 = mony
-            mony_2 = '0000000000'
-            mony_3 = '0000000000'
+            mony_1 = self.mony_to_hex(mony, 5)
         elif amount == 2:
-            mony_1 = '0000000000'
-            mony_2 = mony
-            mony_3 = '0000000000'
+            mony_2 = self.mony_to_hex(mony, 5)
         elif amount == 3:
-            mony_1 = '0000000000'
-            mony_2 = '0000000000'
-            mony_3 = mony
+            mony_3 = self.mony_to_hex(mony, 5)
         else:
             raise AFTBadAmount
-
+        self.AFT_register()
+        if lock_timeout is None:
+            lock_timeout = self.lock_time
+        self.last_AFT_lock_status = False
+        if lock_timeout > 0:
+            lock_data = self.AFT_game_lock_and_status_request(lock_timeout=lock_timeout)
+            if lock_data == None or lock_data == False:
+                self.log.warning('EMG is not locked')
+                self.last_AFT_lock_status = True
+                data = self.AFT_clean_transaction_poll()
+                return False
+            if lock_data['game_lock_status'] != '00':
+                self.log.warning('EMG is not locked')
+                self.last_AFT_lock_status = True
+                data = self.AFT_clean_transaction_poll()
+                return False
         last_transaction = self.AFT_format_transaction()
         len_transaction_id = hex(int(len(last_transaction) // 2))[2:]
         # raise KeyError(last_transaction, len_transaction_id)
@@ -2177,24 +2206,21 @@ class Sas():
             len_transaction_id = '0' + len_transaction_id
         elif len(len_transaction_id) % 2 == 1:
             len_transaction_id = '0' + len_transaction_id
-        cmd = '72{my_key}{transfer_code}{index}00{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
+        cmd = '{transfer_code}{index}00{mony_1}{mony_2}{mony_3}{transfer_flag}{asett}{key}{len_transaction}{transaction}{times}0C0000'.format(
             transfer_code='00', index='00', mony_1=mony_1, mony_2=mony_2, mony_3=mony_3,
             asett=self.asset_number, key=self.reg_key, len_transaction=len_transaction_id, transaction=last_transaction,
-            times=my_time, my_key=self.my_key, transfer_flag='00')
-        new_cmd = []
-        count = 0
-        for i in range(int(len(cmd) / 2)):
-            new_cmd.append(int(cmd[count:count + 2], 16))
-            count += 2
-
-        # self.AFT_register()
-        # if lock_timeout > 0:
-        #    self.AFT_game_lock(lock_timeout, condition=0)
+            times=my_time, transfer_flag='00')
+        cmd = '72' + hex(int(len(cmd) // 2))[2:] + cmd
+        new_cmd = self.cmd_to_list(cmd)
         response = None
-        self.AFT_register()
-
-        if lock_timeout > 0:
-            self.AFT_game_lock(lock_timeout, condition=0)
+        # self.AFT_register()
+        # if lock_timeout == 0:
+        #     lock_timeout = self.lock_time
+        # if lock_timeout > 0:
+        #     lock_data = self.AFT_game_lock_and_status_request(lock_timeout=lock_timeout)
+        #     if lock_data['game_lock_status'] != '00':
+        #         self.log.warning('EMG is not locked')
+        #         return None
         try:
             data = self._send_command(new_cmd, crc_need=True, size=82)
             if (data is not None):
@@ -2205,9 +2231,9 @@ class Sas():
                     'Transfer status': AFT_TRANSFER_STATUS[self.hexlify(self.bytearray(data[3:4]))],
                     'Receipt status': AFT_RECEIPT_STATUS[self.hexlify(self.bytearray(data[4:5]))],
                     'Transfer type': AFT_TRANSFER_TYPE[self.hexlify(self.bytearray(data[5:6]))],
-                    'Cashable amount': int(self.hexlify(self.bytearray(data[6:11]))) * self.denom,
-                    'Restricted amount': int(self.hexlify(self.bytearray(data[11:16]))) * self.denom,
-                    'Nonrestricted amount': int(self.hexlify(self.bytearray(data[16:21]))) * self.denom,
+                    'Cashable amount': round(int(self.hexlify(self.bytearray(data[6:11]))) * self.denom, 2),
+                    'Restricted amount': round(int(self.hexlify(self.bytearray(data[11:16]))) * self.denom, 2),
+                    'Nonrestricted amount': round(int(self.hexlify(self.bytearray(data[16:21]))) * self.denom, 2),
                     'Transfer flags': self.hexlify(self.bytearray(data[21:22])),
                     'Asset number': self.hexlify(self.bytearray(data[22:26])),
                     'Transaction ID length': self.hexlify(self.bytearray(data[26:27])),
@@ -2232,10 +2258,7 @@ class Sas():
         # time.sleep(0.7)
         cmd = '7202FF00'
         count = 0
-        new_cmd = []
-        for i in range(int(len(cmd) / 2)):
-            new_cmd.append(int(cmd[count:count + 2], 16))
-            count += 2
+        new_cmd = self.cmd_to_list(cmd)
         response = None
         try:
             data = self._send_command(new_cmd, crc_need=True, size=90)
@@ -2247,14 +2270,17 @@ class Sas():
                     'Transfer status': AFT_TRANSFER_STATUS[self.hexlify(self.bytearray(data[3:4]))],
                     'Receipt status': AFT_RECEIPT_STATUS[self.hexlify(self.bytearray(data[4:5]))],
                     'Transfer type': AFT_TRANSFER_TYPE[self.hexlify(self.bytearray(data[5:6]))],
-                    'Cashable amount': int(self.hexlify(self.bytearray(data[6:11]))) * self.denom,
-                    'Restricted amount': int(self.hexlify(self.bytearray(data[11:16]))) * self.denom,
-                    'Nonrestricted amount': int(self.hexlify(self.bytearray(data[16:21]))) * self.denom,
+                    'Cashable amount': round(int(self.hexlify(self.bytearray(data[6:11]))) * self.denom, 2),
+                    'Restricted amount': round(int(self.hexlify(self.bytearray(data[11:16]))) * self.denom, 2),
+                    'Nonrestricted amount': round(int(self.hexlify(self.bytearray(data[16:21]))) * self.denom, 2),
                     'Transfer flags': self.hexlify(self.bytearray(data[21:22])),
                     'Asset number': self.hexlify(self.bytearray(data[22:26])),
                     'Transaction ID length': self.hexlify(self.bytearray(data[26:27])),
                     'Transaction ID': self.hexlify(self.bytearray(data[27:(27 + a)]))
                 }
+            if self.last_AFT_lock_status == True:
+                response['Transfer status'] = 'Gaming machine not locked (transfer specified lock required)'
+                return response
             if register == True:
                 # try:
                 self.AFT_unregister()
@@ -2263,7 +2289,7 @@ class Sas():
             elif hex(self.transaction)[2:] == response['Transaction ID']:
                 return response
             else:
-                if self.aft_get_last_transaction == True:
+                if self.aft_check_last_transaction == True:
                     raise BadTransactionID('last: %s, new:%s ' % (
                         hex(self.transaction)[2:], response['Transaction ID']))
                 else:
@@ -2271,14 +2297,16 @@ class Sas():
                         hex(self.transaction)[2:], response['Transaction ID']))
         except BadCRC:
             pass
+        if self.last_AFT_lock_status:
+            self.last_AFT_lock_status = False
         return False
 
-    def AFT_transfer_funds(self, transfer_code=0x00, transaction_index=0x00, transfer_type=0x00, cashable_amount=0,
-                           restricted_amount=0, non_restricted_amount=0, transfer_flags=0x00,
-                           asset_number=b'\x00\x00\x00\x00\x00', registration_key=0, transaction_ID_lenght=0x00,
+    def AFT_transfer_funds(self, security_code=44, transfer_code=00, transaction_index=00, transfer_type=00, cashable_amount=0,
+                           restricted_amount=0, non_restricted_amount=0, transfer_flags=00,
+                           asset_number=b'0000000000', registration_key=0, transaction_ID_lenght=0x00,
                            transaction_ID='', expiration=0, pool_ID=0, reciept_data='', lock_timeout=0, **kwargs):
         # 72
-        cmd = [0x72, 0x00]
+        cmd = [0x72, security_code]
         cmd.append(transfer_code)
         cmd.append(transaction_index)
         cmd.append(transfer_type)
@@ -2298,7 +2326,8 @@ class Sas():
         cmd.extend(self.bcd_coder_array(lock_timeout, 2))
 
         cmd[1] = len(transaction_ID) + len(transaction_ID) + 53
-
+        new_cmd = self.cmd_to_list(cmd)
+        cmd = new_cmd
         data = self._send_command(cmd, crc_need=True)
         if (data is not None):
             aft_statement['transaction_buffer_position'] = int(self.hexlify(self.bytearray(data[2:3])), 16)
@@ -2343,7 +2372,7 @@ class Sas():
             self.log.warning('AFT no transaction')
         if (data is not None):
             try:
-                # if self.aft_get_last_transaction == False:
+                # if self.aft_check_last_transaction == False:
                 #     raise ValueError
 
                 count = int(self.hexlify(self.bytearray(data[26:27])), 16)
@@ -2372,9 +2401,12 @@ class Sas():
             #if not self.transaction:
             transaction = int('2020202020202020202020202020202021', 16)
             self.log.warning('AFT no transaction')
+        self.transaction = transaction
         return transaction
 
-    def AFT_format_transaction(self, get_from_emg=False, **kwargs):
+    def AFT_format_transaction(self, get_from_emg=None, **kwargs):
+        if get_from_emg is None:
+            get_from_emg = self.get_aft_transaction_from_EMG
         if get_from_emg == True:
             self.transaction = self.AFT_get_last_transaction()
         self.transaction += 1
@@ -2386,9 +2418,12 @@ class Sas():
             count += 2
         tmp.reverse()
         for i in range(len(tmp)):
-            if int(tmp[i], 16) >= 124:
+            if int(tmp[i], 16) >= 126:
                 tmp[i] = '20'
-                tmp[i + 1] = hex(int(tmp[i + 1], 16) + 1)[2:]
+                if int(tmp[i + 1], 16) + 1 <= 32:
+                    tmp[i + 1] = '20'
+                else:
+                    tmp[i + 1] = hex(int(tmp[i + 1], 16) + 1)[2:]
         tmp.reverse()
         response = ''
         for i in tmp:
@@ -2448,34 +2483,33 @@ class Sas():
             return aft_statement
         return None
 
-    def AFT_game_lock(self, lock_timeout=100, condition='01', **kwargs):
-        return self.AFT_game_lock_and_status_request(lock_code='00', lock_timeout=lock_timeout,
-                                                     condition=condition)
+    # def AFT_game_lock(self, lock_timeout=100, condition='01', **kwargs):
+    #     return self.AFT_game_lock_and_status_request(lock_code='00', lock_timeout=lock_timeout,
+    #                                                  condition=condition)
+    #
+    # def AFT_game_unlock(self, **kwargs):
+    #     return self.AFT_game_lock_and_status_request(lock_code='80')
 
-    def AFT_game_unlock(self, **kwargs):
-        return self.AFT_game_lock_and_status_request(lock_code='80')
-
-    def AFT_game_lock_and_status_request(self, lock_code='00', lock_time=0, condition='01', **kwargs):
+    def AFT_game_lock_and_status_request(self, lock_code='00', lock_timeout=200, condition='01', **kwargs):
         # 74
-        lock_time = str(lock_time)
-        if len(lock_time) == 1:
-            lock_time = '000%s' % (lock_time)
-        elif len(lock_time) == 2:
-            lock_time = '00%s' % (lock_time)
-        elif len(lock_time) == 3:
-            lock_time = '0%s' % (lock_time)
-        elif len(lock_time) == 4:
-            lock_time = '%s' % (lock_time)
-        else:
-            raise ValueError('Invalid time')
+        try:
+            lock_time = self.mony_to_hex(lock_timeout, 2, False)
+        except Exception as e:
+            raise ValueError(e.__str__())
+        # if len(lock_time) == 1:
+        #     lock_time = '000%s' % (lock_time)
+        # elif len(lock_time) == 2:
+        #     lock_time = '00%s' % (lock_time)
+        # elif len(lock_time) == 3:
+        #     lock_time = '0%s' % (lock_time)
+        # elif len(lock_time) == 4:
+        #     lock_time = '%s' % (lock_time)
+        # else:
+        #     raise ValueError('Invalid time')
         cmd = '74%s%s%s' % (lock_code, condition, lock_time)
-        new_cmd = []
-        count = 0
-        for i in range(int(len(cmd) / 2)):
-            new_cmd.append(int(cmd[count:count + 2], 16))
-            count += 2
+        new_cmd = self.cmd_to_list(cmd)
         response = self._send_command(new_cmd, crc_need=True, size=40)
-        if (response):
+        if (response is not None):
             aft_statement = {}
             aft_statement['asset_number'] = str(self.hexlify(self.bytearray(response[2:6])))
             aft_statement['game_lock_status'] = str(self.hexlify(self.bytearray(response[6:7])))
@@ -2503,9 +2537,9 @@ class Sas():
                 'Transfer status': AFT_TRANSFER_STATUS[self.hexlify(self.bytearray(data[3:4]))],
                 'Receipt status': AFT_RECEIPT_STATUS[self.hexlify(self.bytearray(data[4:5]))],
                 'Transfer type': AFT_TRANSFER_TYPE[self.hexlify(self.bytearray(data[5:6]))],
-                'Cashable amount': int(self.hexlify(self.bytearray(data[6:11]))) * self.denom,
-                'Restricted amount': int(self.hexlify(self.bytearray(data[11:16]))) * self.denom,
-                'Nonrestricted amount': int(self.hexlify(self.bytearray(data[16:21]))) * self.denom,
+                'Cashable amount': round(int(self.hexlify(self.bytearray(data[6:11]))) * self.denom, 2),
+                'Restricted amount': round(int(self.hexlify(self.bytearray(data[11:16]))) * self.denom, 2),
+                'Nonrestricted amount': round(int(self.hexlify(self.bytearray(data[16:21]))) * self.denom, 2),
                 'Transfer flags': self.hexlify(self.bytearray(data[21:22])),
                 'Asset number': self.hexlify(self.bytearray(data[22:26])),
                 'Transaction ID length': self.hexlify(self.bytearray(data[26:27])),
@@ -2624,19 +2658,20 @@ class Sas():
         if game_selected == None:
             return None
         elif game_selected == 0:
-            return None
+            return 'NoGame'
         elif game_selected < 0:
-            return None
-
-        cmd = str(int(round(mony / self.denom, 2)))
-        # cmd = cmd.replace('.', '')
-        cmd = '0' * (8 - len(cmd)) + cmd
-        my_cmd = cmd + tax
-        cmd = [0x8A]
-        count = 0
-        for i in range(int(len(my_cmd) / 2)):
-            cmd.append(int(my_cmd[count:count + 2], 16))
-            count += 2
+            return 'NoGame'
+        cmd = '8A' + self.mony_to_hex(mony, 4) + tax
+        cmd = self.cmd_to_list(cmd)
+        # cmd = str(int(round(mony / self.denom, 2)))
+        # # cmd = cmd.replace('.', '')
+        # cmd = '0' * (8 - len(cmd)) + cmd
+        # my_cmd = cmd + tax
+        # cmd = [0x8A]
+        # count = 0
+        # for i in range(int(len(my_cmd) / 2)):
+        #     cmd.append(int(my_cmd[count:count + 2], 16))
+        #     count += 2
         if (self._send_command(cmd, True, crc_need=True) == self.adress):
             return True
         # else:
@@ -2692,9 +2727,10 @@ class Sas():
         # 99
         return
 
-    def legacy_bonus_meters(self, denom=True, n=0, **kwargs):
+    def legacy_bonus_meters(self, denom=True, game_number='0000', **kwargs):
         # 9A
-        cmd = [0x9A, ((n >> 8) & 0xFF), (n & 0xFF)]
+        game_number = int(game_number, 16)
+        cmd = [0x9A, ((game_number >> 8) & 0xFF), (game_number & 0xFF)]
         # cmd.extend([(n&0xFF), ((n>>8)&0xFF)])
         # cmd=[0x19]
         data = self._send_command(cmd, crc_need=True, size=18)
@@ -2819,8 +2855,6 @@ class Sas():
         # FF
         return
 
-    def bcd_coder_array(self, value=0, lenght=4, **kwargs):
-        return self.int_to_bcd(value, lenght)
 
     def bytearray(self, data):
         return data.hex()
@@ -2829,7 +2863,11 @@ class Sas():
         data = data.replace('-', '')
         return data
 
-    def int_to_bcd(self, number=0, lenght=5, **kwargs):
+
+    def bcd_coder_array(self, value=0, lenght=5):
+        return self.int_to_bcd(value, lenght)
+
+    def int_to_bcd(self, number=0, lenght=5):
         n = 0
         m = 0
         bval = 0
@@ -2839,7 +2877,7 @@ class Sas():
             result.extend([0x00])
         while (p >= 0):
             if (number != 0):
-                digit = number % 10
+                digit = int(number % 10)
                 number = number / 10
                 m = m + 1
             else:
@@ -2854,6 +2892,20 @@ class Sas():
             n = n + 1
         return result
 
+    def mony_to_hex(self, mony=0, lenght=5, denom=True):
+        if denom is True:
+            mony = str(int((mony / self.denom)))
+        else:
+            mony = str(int(mony))
+        mony = mony.replace('.', '')
+        lenght = lenght * 2
+        mony = '0' * (lenght - len(mony)) + mony
+        return mony
+
+    def cmd_to_list(self, cmd):
+        intArray = list(map(lambda x: int(x, 16),
+                            [cmd[i:i + 2] for i in range(0, len(cmd), 2)]))
+        return intArray
 
 class SAS_USB(Sas):
 
@@ -2886,7 +2938,7 @@ class SAS_USB(Sas):
             self.log.debug(buf_header)
             # time.sleep(0.04)
             self.connection.write([self.poll_adress, self.adress])
-            time.sleep(0.02)
+            time.sleep(self.sleep_time)
             # self.close()
             self.connection.parity = serial.PARITY_SPACE
             # self.open()
@@ -2942,12 +2994,27 @@ class SAS_USB(Sas):
         busy = False
         return None
 
-
-if __name__ == '__main__':
-    sas = Sas('/dev/ttyS4')
+def test_aft(types='in', mony=1, port='/dev/ttyS4'):
+    sas = Sas(port)
     print(sas.start())
     print(sas.gaming_machine_ID())
     sas.transaction = sas.AFT_get_last_transaction()
-    while True:
-        print(sas.send_meters_10_15())
-        print(sas.total_dollar_value_of_bills_meter())
+    if types == 'in':
+        print(sas.AFT_in(mony))
+    elif types == 'out':
+        print(sas.AFT_out())
+    elif types == 'won':
+        print(sas.AFT_won(mony))
+    print(sas.AFT_clean_transaction_poll())
+
+if __name__ == '__main__':
+    sas = Sas('/dev/ttyS4')
+    sas.mony_to_hex(10.00)
+    print(sas.start())
+    print(sas.gaming_machine_ID())
+    sas.transaction = sas.AFT_get_last_transaction()
+    print (sas.AFT_in(10, lock_timeout=10))
+    # print(sas.AFT_clean_transaction_poll())
+    # while True:
+    #     print(sas.send_meters_10_15())
+    #     print(sas.total_dollar_value_of_bills_meter())
